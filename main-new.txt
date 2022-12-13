@@ -1,0 +1,403 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+
+	"encoding/json" // package untuk enkode dan mendekode json menjadi struct dan sebaliknya
+	"strconv"       // package yang digunakan untuk mengubah string menjadi tipe int
+
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+)
+
+func main() {
+	r := Router()
+	// fs := http.FileServer(http.Dir("build"))
+	// http.Handle("/", fs)
+	fmt.Println("Server dijalankan pada port 81...")
+
+	log.Fatal(http.ListenAndServe(":81", r))
+}
+
+func CreateConnection() *sql.DB {
+	//Load .env file
+	err := godotenv.Load(".env")
+	if err != nil {
+		log.Fatalf("Error loading .env file")
+	}
+
+	// Open connection to db
+	db, err := sql.Open("postgres", os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		panic(err)
+	}
+
+	// Check the connection
+	err = db.Ping()
+
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Sukses konek DB")
+	return db
+}
+
+type NullString struct {
+	sql.NullString
+}
+
+func (s NullString) MarshalJSON() ([]byte, error) {
+	if !s.Valid {
+		return []byte("null"), nil
+	}
+	return json.Marshal(s.String)
+}
+
+func (s *NullString) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		s.String, s.Valid = "", false
+		return nil
+	}
+	s.String, s.Valid = string(data), true
+	return nil
+}
+
+func Router() *mux.Router {
+
+	router := mux.NewRouter()
+
+	router.HandleFunc("/api/buku", AmbilSemuaBuku).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/buku/{id}", AmbilBuku).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/buku", TmbhBuku).Methods("POST", "OPTIONS")
+	router.HandleFunc("/api/buku/{id}", UpdateBuku).Methods("PUT", "OPTIONS")
+	router.HandleFunc("/api/buku/{id}", HapusBuku).Methods("DELETE", "OPTIONS")
+
+	return router
+}
+
+type response struct {
+	ID      int64  `json:"id,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type Buku struct {
+	ID            int64  `json:"id"`
+	Judul_buku    string `json:"judul_buku"`
+	Penulis       string `json:"penulis"`
+	Tgl_publikasi string `json:"tgl_publikasi"`
+}
+
+type Response struct {
+	Status  int    `json:"status"`
+	Message string `json:"message"`
+	Data    []Buku `json:"data"`
+}
+
+// TambahBuku
+func TmbhBuku(w http.ResponseWriter, r *http.Request) {
+
+	// create an empty user of type User
+	// kita buat empty buku dengan tipe Buku
+	var buku Buku
+
+	// decode data json request ke buku
+	err := json.NewDecoder(r.Body).Decode(&buku)
+
+	if err != nil {
+		log.Fatalf("Tidak bisa mendecode dari request body.  %v", err)
+	}
+
+	// panggil modelsnya lalu insert buku
+	insertID := TambahBuku(buku)
+
+	// format response objectnya
+	res := response{
+		ID:      insertID,
+		Message: "Data buku telah ditambahkan",
+	}
+
+	// kirim response
+	json.NewEncoder(w).Encode(res)
+}
+
+// AmbilBuku mengambil single data dengan parameter id
+func AmbilBuku(w http.ResponseWriter, r *http.Request) {
+	// kita set headernya
+	w.Header().Set("Context-Type", "application/x-www-form-urlencoded")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// dapatkan idbuku dari parameter request, keynya adalah "id"
+	params := mux.Vars(r)
+
+	// konversi id dari tring ke int
+	id, err := strconv.Atoi(params["id"])
+
+	if err != nil {
+		log.Fatalf("Tidak bisa mengubah dari string ke int.  %v", err)
+	}
+
+	// memanggil models ambilsatubuku dengan parameter id yg nantinya akan mengambil single data
+	buku, err := AmbilSatuBukuMod(int64(id))
+
+	if err != nil {
+		log.Fatalf("Tidak bisa mengambil data buku. %v", err)
+	}
+
+	// kirim response
+	json.NewEncoder(w).Encode(buku)
+}
+
+// Ambil semua data buku
+func AmbilSemuaBuku(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Context-Type", "application/x-www-form-urlencoded")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// memanggil models AmbilSemuaBuku
+	bukus, err := AmbilSemuaBukuMod()
+
+	if err != nil {
+		log.Fatalf("Tidak bisa mengambil data. %v", err)
+	}
+
+	var response Response
+	response.Status = 1
+	response.Message = "Success"
+	response.Data = bukus
+
+	// kirim semua response
+	json.NewEncoder(w).Encode(response)
+}
+
+func UpdateBuku(w http.ResponseWriter, r *http.Request) {
+
+	// kita ambil request parameter idnya
+	params := mux.Vars(r)
+
+	// konversikan ke int yang sebelumnya adalah string
+	id, err := strconv.Atoi(params["id"])
+
+	if err != nil {
+		log.Fatalf("Tidak bisa mengubah dari string ke int.  %v", err)
+	}
+
+	// buat variable buku dengan type Buku
+	var buku Buku
+
+	// decode json request ke variable buku
+	err = json.NewDecoder(r.Body).Decode(&buku)
+
+	if err != nil {
+		log.Fatalf("Tidak bisa decode request body.  %v", err)
+	}
+
+	// panggil updatebuku untuk mengupdate data
+	updatedRows := UpdateBukuMod(int64(id), buku)
+
+	// ini adalah format message berupa string
+	msg := fmt.Sprintf("Buku telah berhasil diupdate. Jumlah yang diupdate %v rows/record", updatedRows)
+
+	// ini adalah format response message
+	res := response{
+		ID:      int64(id),
+		Message: msg,
+	}
+
+	// kirim berupa response
+	json.NewEncoder(w).Encode(res)
+}
+
+func HapusBuku(w http.ResponseWriter, r *http.Request) {
+
+	// kita ambil request parameter idnya
+	params := mux.Vars(r)
+
+	// konversikan ke int yang sebelumnya adalah string
+	id, err := strconv.Atoi(params["id"])
+
+	if err != nil {
+		log.Fatalf("Tidak bisa mengubah dari string ke int.  %v", err)
+	}
+
+	// panggil fungsi hapusbuku , dan convert int ke int64
+	deletedRows := HapusBukuMod(int64(id))
+
+	// ini adalah format message berupa string
+	msg := fmt.Sprintf("buku sukses di hapus. Total data yang dihapus %v", deletedRows)
+
+	// ini adalah format reponse message
+	res := response{
+		ID:      int64(id),
+		Message: msg,
+	}
+
+	// send the response
+	json.NewEncoder(w).Encode(res)
+}
+
+func TambahBuku(buku Buku) int64 {
+
+	// mengkoneksikan ke db postgres
+	db := CreateConnection()
+
+	// kita tutup koneksinya di akhir proses
+	defer db.Close()
+
+	// kita buat insert query
+	// mengembalikan nilai id akan mengembalikan id dari buku yang dimasukkan ke db
+	sqlStatement := `INSERT INTO buku (judul_buku, penulis, tgl_publikasi) VALUES ($1, $2, $3) RETURNING id`
+
+	// id yang dimasukkan akan disimpan di id ini
+	var id int64
+
+	// Scan function akan menyimpan insert id didalam id id
+	err := db.QueryRow(sqlStatement, buku.Judul_buku, buku.Penulis, buku.Tgl_publikasi).Scan(&id)
+
+	if err != nil {
+		log.Fatalf("Tidak Bisa mengeksekusi query. %v", err)
+	}
+
+	fmt.Printf("Insert data single record %v", id)
+
+	// return insert id
+	return id
+}
+
+// ambil satu buku
+func AmbilSemuaBukuMod() ([]Buku, error) {
+	// mengkoneksikan ke db postgres
+	db := CreateConnection()
+
+	// kita tutup koneksinya di akhir proses
+	defer db.Close()
+
+	var bukus []Buku
+
+	// kita buat select query
+	sqlStatement := `SELECT * FROM buku`
+
+	// mengeksekusi sql query
+	rows, err := db.Query(sqlStatement)
+
+	if err != nil {
+		log.Fatalf("tidak bisa mengeksekusi query. %v", err)
+	}
+
+	// kita tutup eksekusi proses sql qeurynya
+	defer rows.Close()
+
+	// kita iterasi mengambil datanya
+	for rows.Next() {
+		var buku Buku
+
+		// kita ambil datanya dan unmarshal ke structnya
+		err = rows.Scan(&buku.ID, &buku.Judul_buku, &buku.Penulis, &buku.Tgl_publikasi)
+
+		if err != nil {
+			log.Fatalf("tidak bisa mengambil data. %v", err)
+		}
+
+		// masukkan kedalam slice bukus
+		bukus = append(bukus, buku)
+
+	}
+
+	// return empty buku atau jika error
+	return bukus, err
+}
+
+// mengambil satu buku
+func AmbilSatuBukuMod(id int64) (Buku, error) {
+	// mengkoneksikan ke db postgres
+	db := CreateConnection()
+
+	// kita tutup koneksinya di akhir proses
+	defer db.Close()
+
+	var buku Buku
+
+	// buat sql query
+	sqlStatement := `SELECT * FROM buku WHERE id=$1`
+
+	// eksekusi sql statement
+	row := db.QueryRow(sqlStatement, id)
+
+	err := row.Scan(&buku.ID, &buku.Judul_buku, &buku.Penulis, &buku.Tgl_publikasi)
+
+	switch err {
+	case sql.ErrNoRows:
+		fmt.Println("Tidak ada data yang dicari!")
+		return buku, nil
+	case nil:
+		return buku, nil
+	default:
+		log.Fatalf("tidak bisa mengambil data. %v", err)
+	}
+
+	return buku, err
+}
+
+// update user in the DB
+func UpdateBukuMod(id int64, buku Buku) int64 {
+
+	// mengkoneksikan ke db postgres
+	db := CreateConnection()
+
+	// kita tutup koneksinya di akhir proses
+	defer db.Close()
+
+	// kita buat sql query create
+	sqlStatement := `UPDATE buku SET judul_buku=$2, penulis=$3, tgl_publikasi=$4 WHERE id=$1`
+
+	// eksekusi sql statement
+	res, err := db.Exec(sqlStatement, id, buku.Judul_buku, buku.Penulis, buku.Tgl_publikasi)
+
+	if err != nil {
+		log.Fatalf("Tidak bisa mengeksekusi query. %v", err)
+	}
+
+	// cek berapa banyak row/data yang diupdate
+	rowsAffected, err := res.RowsAffected()
+
+	//kita cek
+	if err != nil {
+		log.Fatalf("Error ketika mengecheck rows/data yang diupdate. %v", err)
+	}
+
+	fmt.Printf("Total rows/record yang diupdate %v\n", rowsAffected)
+
+	return rowsAffected
+}
+
+func HapusBukuMod(id int64) int64 {
+
+	// mengkoneksikan ke db postgres
+	db := CreateConnection()
+
+	// kita tutup koneksinya di akhir proses
+	defer db.Close()
+
+	// buat sql query
+	sqlStatement := `DELETE FROM buku WHERE id=$1`
+
+	// eksekusi sql statement
+	res, err := db.Exec(sqlStatement, id)
+
+	if err != nil {
+		log.Fatalf("tidak bisa mengeksekusi query. %v", err)
+	}
+
+	// cek berapa jumlah data/row yang di hapus
+	rowsAffected, err := res.RowsAffected()
+
+	if err != nil {
+		log.Fatalf("tidak bisa mencari data. %v", err)
+	}
+
+	fmt.Printf("Total data yang terhapus %v", rowsAffected)
+
+	return rowsAffected
+}
